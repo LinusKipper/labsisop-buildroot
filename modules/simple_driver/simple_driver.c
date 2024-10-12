@@ -1,4 +1,5 @@
 /**
+ * @file   simple_driver.c
  * @brief   An introductory character driver. This module maps to /dev/simple_driver and
  * comes with a helper C program that can be run in Linux user space to communicate with
  * this the LKM.
@@ -12,6 +13,8 @@
 #include <linux/kernel.h>         // Contains types, macros, functions for the kernel
 #include <linux/fs.h>             // Header for the Linux file system support
 #include <linux/uaccess.h>
+#include <linux/list.h>
+#include <linux/vmalloc.h>
 
 #define  DEVICE_NAME "simple_driver" ///< The device will appear at /dev/simple_driver using this value
 #define  CLASS_NAME  "simple_class"        ///< The device class -- this is a character device driver
@@ -27,6 +30,13 @@ static short  size_of_message;              ///< Used to remember the size of th
 static int    numberOpens = 0;              ///< Counts the number of times the device is opened
 static struct class *charClass  = NULL; ///< The device-driver class struct pointer
 static struct device *charDevice = NULL; ///< The device-driver device struct pointer
+
+LIST_HEAD(message_list); // == struct list_head name = LIST_HEAD_INIT(name)
+
+struct message_entry {
+	struct list_head list;
+	char   message[256];
+};
 
 // The prototype functions for the character driver -- must come before the struct definition
 static int     dev_open(struct inode *, struct file *);
@@ -126,12 +136,22 @@ static int dev_open(struct inode *inodep, struct file *filep){
  */
 static ssize_t dev_read(struct file *filep, char *buffer, size_t len, loff_t *offset){
 	int error_count = 0;
-   
+
+	if(list_empty(&message_list)) {
+		printk("Empty list\n");
+		return 0;
+	}	
+
+	struct message_entry *ptr = list_first_entry(&message_list, struct message_entry, list);
+	
 	// copy_to_user has the format ( * to, *from, size) and returns 0 on success
-	error_count = copy_to_user(buffer, message, size_of_message);
+	size_of_message = strlen(ptr->message);
+	error_count = copy_to_user(buffer, ptr->message, size_of_message);
 
 	if (error_count==0){            // if true then have success
 		printk(KERN_INFO "Simple Driver: sent %d characters to the user\n", size_of_message);
+		list_del(&ptr->list);
+		vfree(ptr);
 		return (size_of_message=0);  // clear the position to the start and return 0
 	}
 	else {
@@ -150,7 +170,12 @@ static ssize_t dev_read(struct file *filep, char *buffer, size_t len, loff_t *of
  *  @param offset The offset if required
  */
 static ssize_t dev_write(struct file *filep, const char *buffer, size_t len, loff_t *offset){
-	if (len < sizeof(message)){
+
+	struct message_entry *new = (struct message_entry *) vmalloc(sizeof(struct message_entry));
+	sprintf(new->message, "%s(%zu letters)", buffer, len);
+        list_add_tail(&new->list, &message_list);
+
+/*	if (len < sizeof(message)){
 		sprintf(message, "%s(%zu letters)", buffer, len);   // appending received string with its length
 		size_of_message = strlen(message);                 // store the length of the stored message
 		printk(KERN_INFO "Simple Driver: received %zu characters from the user\n", len);
@@ -162,6 +187,9 @@ static ssize_t dev_write(struct file *filep, const char *buffer, size_t len, lof
 		
 		return 0;
 	}
+	*/
+
+	return len;
 }
 
 /** @brief The device release function that is called whenever the device is closed/released by
